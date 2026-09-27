@@ -777,7 +777,9 @@ void Arm64Emitter::SpillStaticRegs(ARMEmitter::Register TmpReg, SpillStaticRegOp
   unsigned PFAFSpillMask = Options.GPRSpillMask & PFAFMask;
   Options.GPRSpillMask &= ~PFAFSpillMask;
 
+#ifndef FEX_CALLRET_STACK_UNUSED
   str(REG_CALLRET_SP, STATE.R(), offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp));
+#endif
 
   for (size_t i = 0; i < StaticRegisters.size(); i += 2) {
     auto Reg1 = StaticRegisters[i];
@@ -882,7 +884,9 @@ void Arm64Emitter::FillStaticRegs(FillStaticRegOptions Options) {
   ldr(STATE, TmpReg, CPU_AREA_EMULATOR_DATA_OFFSET);
 #endif
 
+#ifndef FEX_CALLRET_STACK_UNUSED
   ldr(REG_CALLRET_SP, STATE.R(), offsetof(FEXCore::Core::CpuStateFrame, State.callret_sp));
+#endif
 
 #ifdef FEX_GUEST_WINDOW
   // No-op unless a guest window is configured.

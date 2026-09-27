@@ -1308,6 +1308,7 @@ ContextImpl::CompileCodeResult ContextImpl::CompileCode(FEXCore::Core::InternalT
 }
 
 #ifdef FEX_IOS_HOST
+#ifdef ARCHITECTURE_arm64ec
 /* iOS-Madeira ml306 (task #51): CallbackPtr entry-state capture buffer, defined in Dispatcher.cpp
  * and written by emitted code at CallbackPtr entry. Read by the [cb-entry] reporter below. */
 extern "C" uint64_t IosCbEntryLog[8];
@@ -1317,6 +1318,17 @@ extern "C" uint64_t IosJitReverseTranslate(uint64_t Addr);
 /* iOS-Madeira ml316: ExitToX64's FFS-bypass counters, defined in Module.cpp and written by
  * the bypass asm in Module.S. Reported below the same way as [cb-entry]. */
 extern "C" uint64_t IosFfsBypassLog[4];
+#else
+/* The WOW64 module (libwow64fex.dll) is a plain aarch64 PE with no Module.S, no EC entry thunks
+ * and no FFS bypass, so the last two symbols above do not exist in its link. Zeroed storage and an
+ * identity translation: the FFS reporter below compares against counters nothing increments, and
+ * the module has no PE-image-to-pool alias table (its guest images are mapped normally). */
+extern "C" uint64_t IosCbEntryLog[8];
+static uint64_t IosFfsBypassLog[4] {};
+static inline uint64_t IosJitReverseTranslate(uint64_t Addr) {
+  return Addr;
+}
+#endif
 #endif
 
 #ifdef FEX_IOS_HOST
