@@ -1222,7 +1222,8 @@ void BTCpuProcessInit() {
 
   CTX->InitCore();
   Context::HandlerConfig.emplace(*CTX);
-  InvalidationTracker.emplace(*CTX, Threads);
+  // The tracker speaks host addresses to the OS and converts at its calls into FEXCore.
+  InvalidationTracker.emplace(*CTX, Threads, GuestWindow::Base);
   ImageTracker.emplace(*CTX, false);
 
   // The 64-bit PEB's ImageBaseAddress is a HOST address: ntdll-unix's init_peb stores the address
