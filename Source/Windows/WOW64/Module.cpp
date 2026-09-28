@@ -716,6 +716,52 @@ bool HandleUnalignedAccess(TLS TLS, CONTEXT* Context) {
   return Result.has_value();
 }
 
+#ifdef FEX_IOS_HOST
+/* MADEIRA: the CPU area is the 32-bit register state other threads see and set.
+ *
+ * Wine keeps a WOW64_CPURESERVED header ({ USHORT Flags; USHORT Machine; }) at
+ * TEB64->TlsSlots[WOW64_TLS_CPURESERVED], followed by the I386_CONTEXT that
+ * RtlWow64GetCurrentCpuArea() returns. A GetThreadContext from another thread
+ * reads that context, and a SetThreadContext from another thread writes it and
+ * sets WOW64_CPURESERVED_FLAG_RESET_STATE (ntdll's set_thread_wow64_context,
+ * and the iOS wineserver's apply-on-resume path, which writes it while the
+ * target is held inside a system call). wow64cpu, the reference CPU module,
+ * stores its registers into the CPU area on every transition out of 32-bit
+ * code and reloads them when it finds RESET_STATE on the way back.
+ *
+ * This module only did the equivalent through WOW_CPU_AREA_DIRTY, which is set
+ * by BTCpuSuspendLocalThread. The Wine tree this host uses never calls that
+ * (wow64's NtSuspendThread thunk is a plain NtSuspendThread and
+ * Wow64SuspendLocalThread is a stub), so a cross-thread Get saw whatever the
+ * CPU area held since the last BTCpuGetContext/SetContext, and a cross-thread
+ * Set was never loaded. So, as wow64cpu does:
+ *   - FlushCpuAreaForExit() stores the JIT state into the CPU area before a
+ *     system call or unix call leaves emitted code;
+ *   - LockJITContext() consumes RESET_STATE on the thread's own CPU area and
+ *     reloads the JIT state from it, exactly as for WOW_CPU_AREA_DIRTY.
+ * Both only touch the calling thread's own TEB. */
+static constexpr size_t IosWow64TlsCpuReserved = 1;      // WOW64_TLS_CPURESERVED
+static constexpr uint16_t IosWow64CpuResetState = 1;     // WOW64_CPURESERVED_FLAG_RESET_STATE
+
+static bool ConsumeCpuAreaReset(_TEB* TEB) {
+  auto* Flags = reinterpret_cast<uint16_t*>(TEB->TlsSlots[IosWow64TlsCpuReserved]);
+  if (!Flags || !(__atomic_load_n(Flags, __ATOMIC_ACQUIRE) & IosWow64CpuResetState)) {
+    return false;
+  }
+  __atomic_fetch_and(Flags, static_cast<uint16_t>(~IosWow64CpuResetState), __ATOMIC_ACQ_REL);
+  return true;
+}
+
+void FlushCpuAreaForExit(TLS TLS) {
+  if (TLS.TEB != CurrentTEB() || !TLS.TEB->TlsSlots[IosWow64TlsCpuReserved]) {
+    return;
+  }
+  WOW64_CONTEXT* WowContext;
+  RtlWow64GetCurrentCpuArea(nullptr, reinterpret_cast<void**>(&WowContext), nullptr);
+  StoreWowContextFromState(TLS.ThreadState(), WowContext);
+}
+#endif
+
 void LockJITContext(TLS TLS) {
   uint32_t Expected = TLS.ControlWord().load(), New;
 
@@ -725,6 +771,13 @@ void LockJITContext(TLS TLS) {
     New = (Expected | ControlBits::IN_JIT) & ~ControlBits::WOW_CPU_AREA_DIRTY;
   } while (!TLS.ControlWord().compare_exchange_weak(Expected, New, std::memory_order::relaxed));
   std::atomic_signal_fence(std::memory_order::seq_cst);
+
+#ifdef FEX_IOS_HOST
+  // MADEIRA: a context set from outside (see ConsumeCpuAreaReset) counts as a dirty CPU area.
+  if (TLS.TEB == CurrentTEB() && ConsumeCpuAreaReset(TLS.TEB)) {
+    Expected |= ControlBits::WOW_CPU_AREA_DIRTY;
+  }
+#endif
 
   // If the CPU area is dirty, flush it to the JIT context before reentry
   if (Expected & ControlBits::WOW_CPU_AREA_DIRTY) {
@@ -817,6 +870,9 @@ public:
       ReturnRSP += sizeof(StackLayout);
 
       const auto TLS = GetTLS();
+#ifdef FEX_IOS_HOST
+      Context::FlushCpuAreaForExit(TLS); // MADEIRA: see ConsumeCpuAreaReset
+#endif
       Context::UnlockJITContext(TLS);
       // StackArgs->Args is a 32-bit GUEST pointer to the call's parameter block, and the unix side
       // dereferences it natively, so it has to cross as a host pointer.
@@ -834,6 +890,9 @@ public:
       const uint64_t EntryRAX = Frame->State.gregs[FEXCore::X86State::REG_RAX];
 
       const auto TLS = GetTLS();
+#ifdef FEX_IOS_HOST
+      Context::FlushCpuAreaForExit(TLS); // MADEIRA: see ConsumeCpuAreaReset
+#endif
       Context::UnlockJITContext(TLS);
       Wow64ProcessPendingCrossProcessItems();
       // wow64.dll reads the argument block directly, so it needs a host pointer. The 32-bit values
