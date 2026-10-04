@@ -5,6 +5,7 @@
 #include <FEXCore/Core/Context.h>
 #include <FEXCore/Core/HostFeatures.h>
 #include <FEXCore/fextl/fmt.h>
+#include <FEXCore/Utils/LogManager.h>
 
 #include <windows.h>
 
@@ -120,6 +121,7 @@ FEXCore::HostFeatures CPUFeatures::FetchHostFeatures(bool IsWine, FEXCore::HostF
       Avx && Avx[0] == '1' && HostType != FEXCore::HostFeatures::HostTypeEnum::Wow64) {
     HostFeatures.SupportsAVX = true;
     HostFeatures.SupportsAES256 = HostFeatures.SupportsAES;
+    LogMan::Msg::IFmt("[fex-avx] MADEIRA_FEX_AVX=1: AVX and AVX2 reported and emulated");
   }
   return HostFeatures;
 #else
