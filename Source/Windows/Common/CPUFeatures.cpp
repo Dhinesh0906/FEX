@@ -81,13 +81,15 @@ FEXCore::HostFeatures CPUFeatures::FetchHostFeatures(bool IsWine, FEXCore::HostF
   HostFeatures.SupportsFlagM2 = true;
   HostFeatures.SupportsAFP = true;
 
-#if defined(FEX_IOS_HOST) && !defined(ARCHITECTURE_arm64ec)
-  /* The list above assumes the newest cores, and a wrong `true` is silent corruption rather than a
-   * crash: FEAT_AFP claimed on a core without it leaves FPCR.NEP RES0, so every scalar SSE operation
-   * zeroes the upper lanes of its destination. This module cannot call sysctl, but the app can: it
-   * publishes `FEX_MADEIRA_HOSTPROBE=AFP=0,FLAGM=1,...` ("?" when a sysctl does not exist). Only an
-   * explicit `=0` turns a feature off; no variable, or "?", keeps the assumption. WOW64 module
-   * only; the ARM64EC module keeps its current feature set. */
+#if defined(FEX_IOS_HOST)
+  /* The list above assumes the newest cores. A wrong `true` is silent corruption (FEAT_AFP claimed
+   * on a core without it leaves FPCR.NEP RES0, so every scalar SSE operation zeroes the upper lanes
+   * of its destination) or SIGILL: FEX emits AXFLAG/XAFLAG (FlagM2) and CFINV, RMIF, SETF8/16
+   * (FlagM) for ordinary x86 flag handling, and A12 has neither, A13 no FlagM2, so a 64-bit game
+   * there stopped with STATUS_ILLEGAL_INSTRUCTION (0xC000001D). This module cannot call sysctl, but
+   * the app can: it publishes `FEX_MADEIRA_HOSTPROBE=AFP=0,FLAGM=1,...` ("?" when a sysctl does not
+   * exist). Only an explicit `=0` turns a feature off; no variable, or "?", keeps the assumption.
+   * Both modules; FEX has a fallback for each feature. */
   if (const char* Probe = getenv("FEX_MADEIRA_HOSTPROBE")) {
     const auto Absent = [Probe](const char* Key) {
       const size_t Len = strlen(Key);
