@@ -960,12 +960,18 @@ public:
     InvalidationTracker->InvalidateAlignedInterval(GuestWindow::ToHost(Start), Length, false);
   }
 
+  // ml1277: NOT guest addresses. The only caller is FEXCore's LookupCache, which marks its own
+  // host allocation (the per-thread L1/L2 arrays in the FEX arena). Adding the window base
+  // registered a range nobody touches, so after a code-buffer change decommitted a thread's L1
+  // (ClearThreadLocalCaches does not recommit), the dispatcher's next lookup faulted, the tracker
+  // did not recognise it, and the access violation reached the guest (Terraria's Mono hung in its
+  // crash handler).
   void MarkOvercommitRange(uint64_t Start, uint64_t Length) override {
-    OvercommitTracker->MarkRange(GuestWindow::ToHost(Start), Length);
+    OvercommitTracker->MarkRange(Start, Length);
   }
 
   void UnmarkOvercommitRange(uint64_t Start, uint64_t Length) override {
-    OvercommitTracker->UnmarkRange(GuestWindow::ToHost(Start), Length);
+    OvercommitTracker->UnmarkRange(Start, Length);
   }
 
   FEXCore::HLE::ExecutableRangeInfo QueryGuestExecutableRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Address) override {
