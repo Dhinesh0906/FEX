@@ -321,6 +321,16 @@ void InvalidationTracker::HandleImageMap(std::string_view Name, uint64_t Address
   if (IsWineMono) {
     const char* Env = getenv("MADEIRA_WINEMONO_BRIDGE");
     WineMonoOptIn = Env && Env[0] == '1';
+#if !defined(ARCHITECTURE_arm64ec)
+    /* ml1282: automatic for Wine Mono's 32-bit runtime in a guest window, where ntdll makes
+     * the process's RWX memory plain (ml1279) once this DLL is mapped: verified on Terraria
+     * (without it the game loads much longer). MADEIRA_WINEMONO_BRIDGE=0 or
+     * MADEIRA_WOW_RWX_PLAIN=0 keeps it off; the 64-bit runtime stays opt-in. */
+    if (GuestBase && Name == "libmono-2.0-x86.dll" && !(Env && Env[0] == '0')) {
+      const char* Plain = getenv("MADEIRA_WOW_RWX_PLAIN");
+      WineMonoOptIn = !(Plain && Plain[0] == '0');
+    }
+#endif
     LogMan::Msg::EFmt("[mono-winemono] ml712 module={} base={:#x} opt-in={} (MADEIRA_WINEMONO_BRIDGE={})", Name, Address,
                       WineMonoOptIn ? 1 : 0, Env ? Env : "unset");
   }
@@ -685,6 +695,21 @@ void InvalidationTracker::DetectMonoBackpatcherBlock(FEXCore::Core::InternalThre
    * that cannot change. The win here comes purely from MarkMonoBackpatcherBlock
    * plus the alias-directed MonoBackpatcherWrite. */
   DisableSMCDetection();
+#elif !defined(ARCHITECTURE_arm64ec)
+  /* ml1280: ...except in a 32-bit guest window whose RWX memory is plain read/write
+   * (ml1279 in ntdll, automatic once libmono-2.0-x86.dll is mapped since ml1282; reaching
+   * this point means that DLL is the detected runtime): there write CAN be granted, so do what
+   * upstream does. Mono rewrites live code only through this backpatcher, now handled by
+   * MonoBackpatcherWrite plus a targeted invalidation; new methods go to fresh memory.
+   * Terraria run 11 paid 48,866 SMC faults (each a page invalidation, recompiles and a
+   * 16 MB call-ret reset) mostly for these patches. */
+  if (GuestBase) {
+    const char* Plain = getenv("MADEIRA_WOW_RWX_PLAIN");
+    if (!(Plain && Plain[0] == '0')) {   /* ml1282: on unless plain memory is turned off */
+      LogMan::Msg::EFmt("[mono-site] ml1280 plain guest RWX: SMC detection disabled after the backpatcher was found");
+      DisableSMCDetection();
+    }
+  }
 #endif
   {
     std::scoped_lock CodeLock(CTX.GetCodeInvalidationMutex());

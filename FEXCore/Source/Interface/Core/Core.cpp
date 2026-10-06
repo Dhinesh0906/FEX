@@ -1464,6 +1464,9 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
   }
 #endif
 
+#ifdef FEX_IOS_HOST
+  /* The capture buffers reported below exist only in the FEX_IOS_HOST (Windows module)
+   * builds, not in the native iOS FEXCore libraries that build/fex-ios makes. */
   /* iOS-Madeira ml304 (task #51): REPORT CallbackPtr ENTRY ON ITS OWN, not via the bogus-RIP path.
    *
    * ml302 proved the JITCallback prologue writes the bad State.rip, and ml303 added an LR witness --
@@ -1514,6 +1517,7 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
                         IosCbEntryLog[4], IosCbEntryLog[5], IosCbEntryLog[7]);
     }
   }
+#endif
 
   /* iOS-Madeira: refuse to compile obviously-invalid guest RIPs. After a
    * NULL-vtable virtual call (`call [rax+8]` with rax=0), control flow
@@ -1965,7 +1969,8 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
        * discriminator, and fail_invalid outranks both. ⚠️ A changed token is NOT
        * automatically healthy contention — it can equally be page reuse or a
        * foreign writer, so check block_index/list_size against block_count before
-       * concluding anything. */
+       * concluding anything. Only the FEX_IOS_HOST (Windows module) builds link rpmalloc. */
+#ifdef FEX_IOS_HOST
       {
         rpm_cas_snapshot Snap;
         if (rpm_cas_snapshot_take(&Snap)) {
@@ -1979,6 +1984,7 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
                             Snap.fail_changed, Snap.fail_unchanged, Snap.fail_invalid);
         }
       }
+#endif
     }
   }
 
