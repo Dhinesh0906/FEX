@@ -310,6 +310,8 @@ void InvalidationTracker::HandleImageMap(std::string_view Name, uint64_t Address
    * points at a build-server path) and its exports are ~195KB apart around the hot RIP, so
    * the faulting site CANNOT be symbolized offline to prove it is a code-patching routine.
    * Until it is, this stays off by default and the detected RIP is logged for inspection.
+   * (ml1282/ml1286: both runtimes now arm it by default, each after a game ran on it;
+   * MADEIRA_WINEMONO_BRIDGE=0 restores the opt-in.)
    *
    * NOTE: this storm is a STARTUP cost and is NOT why the game shows no window. Measured
    * between matched checkpoints the rate is ~91/sec by the time FNA3D loads, not the
@@ -331,6 +333,14 @@ void InvalidationTracker::HandleImageMap(std::string_view Name, uint64_t Address
       /* As ntdll reads it (ios_wow_rwx_plain_mode): unset, empty or 1 is plain memory,
        * any other value keeps it pool-aliased. */
       WineMonoOptIn = !Plain || !Plain[0] || Plain[0] == '1';
+    }
+#else
+    /* ml1286: automatic for Wine Mono's 64-bit runtime too. A 64-bit .NET Framework game
+     * (FNA) went from no first frame in 85 s to its stage at 60 FPS with the bridge armed,
+     * cooperative suspend and the alias-store emulation (ml1283/ml1284); its memory stays
+     * pool-aliased, so SMC detection is left on. MADEIRA_WINEMONO_BRIDGE=0 keeps it off. */
+    if (Name == "libmono-2.0-x86_64.dll" && !(Env && Env[0] == '0')) {
+      WineMonoOptIn = true;
     }
 #endif
     LogMan::Msg::EFmt("[mono-winemono] ml712 module={} base={:#x} opt-in={} (MADEIRA_WINEMONO_BRIDGE={})", Name, Address,
