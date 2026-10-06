@@ -328,7 +328,9 @@ void InvalidationTracker::HandleImageMap(std::string_view Name, uint64_t Address
      * MADEIRA_WOW_RWX_PLAIN=0 keeps it off; the 64-bit runtime stays opt-in. */
     if (GuestBase && Name == "libmono-2.0-x86.dll" && !(Env && Env[0] == '0')) {
       const char* Plain = getenv("MADEIRA_WOW_RWX_PLAIN");
-      WineMonoOptIn = !(Plain && Plain[0] == '0');
+      /* As ntdll reads it (ios_wow_rwx_plain_mode): unset, empty or 1 is plain memory,
+       * any other value keeps it pool-aliased. */
+      WineMonoOptIn = !Plain || !Plain[0] || Plain[0] == '1';
     }
 #endif
     LogMan::Msg::EFmt("[mono-winemono] ml712 module={} base={:#x} opt-in={} (MADEIRA_WINEMONO_BRIDGE={})", Name, Address,
@@ -705,7 +707,7 @@ void InvalidationTracker::DetectMonoBackpatcherBlock(FEXCore::Core::InternalThre
    * 16 MB call-ret reset) mostly for these patches. */
   if (GuestBase) {
     const char* Plain = getenv("MADEIRA_WOW_RWX_PLAIN");
-    if (!(Plain && Plain[0] == '0')) {   /* ml1282: on unless plain memory is turned off */
+    if (!Plain || !Plain[0] || Plain[0] == '1') {   /* ml1282: on unless plain memory is turned off (as ntdll reads it) */
       LogMan::Msg::EFmt("[mono-site] ml1280 plain guest RWX: SMC detection disabled after the backpatcher was found");
       DisableSMCDetection();
     }
