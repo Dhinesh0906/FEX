@@ -105,7 +105,7 @@ private:
   };
   fextl::vector<PendingJumpThunk> PendingJumpThunks;
 
-  Utils::PoolBufferWithTimedRetirement<uint8_t*, 5000, 500> TempAllocator;
+  Utils::PoolBufferWithTimedRetirement<uint8_t*, Utils::PoolRetireMS, 500> TempAllocator;
 
   static uint64_t ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEXCore::Context::ExitFunctionLinkData* Record);
 

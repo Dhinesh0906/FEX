@@ -115,7 +115,16 @@ struct alignas(FEXCore::Utils::FEX_PAGE_SIZE) InternalThreadState : public FEXCo
   // observed in Thumper FMOD worker, the original 4MB filled up. 16MB buys
   // ~1M entries — enough to survive normal game runtimes that have a few
   // hundred per-thread caught faults. Real fix: callret-aware SEH unwind.
+#if defined(FEX_IOS_HOST) && !defined(ARCHITECTURE_arm64ec)
+  // MADEIRA, WOW64 module: the shadow stack is compiled out there
+  // (FEX_CALLRET_STACK_UNUSED, Arm64Emitter.h) -- nothing pushes, pops or reads
+  // it, and the 2MB/4MB offsets in BranchOps.cpp and Dispatcher.cpp are
+  // ARM64EC-only. 16MB per thread of untouched reservation was the largest single
+  // item in the host band on a 454 GB map (22 threads = 352MB).
+  static constexpr size_t CALLRET_STACK_SIZE {0x10000};
+#else
   static constexpr size_t CALLRET_STACK_SIZE {0x1000000};
+#endif
 
   // iOS-Madeira ml609/ml610: NAMED bounds for the window the CALL/RET guard enforces.
   //

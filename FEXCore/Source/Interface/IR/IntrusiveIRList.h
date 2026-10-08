@@ -130,7 +130,7 @@ public:
   }
 
 private:
-  Utils::PoolBufferWithTimedRetirement<uintptr_t, 5000, 500> PoolObject;
+  Utils::PoolBufferWithTimedRetirement<uintptr_t, Utils::PoolRetireMS, 500> PoolObject;
 };
 
 class IRListView final {

@@ -37,6 +37,13 @@ namespace FEXCore::Utils {
  *
  * During buffer reclaiming is also when unclaimed buffers get freed. This means active threads are able to clean up idle thread's unused memory.
  */
+// MADEIRA: the pool's reclaim window and the per-thread retirement period, kept equal.
+#if defined(FEX_IOS_HOST) && !defined(__arm64ec__) && !defined(_M_ARM64EC)
+constexpr size_t PoolRetireMS = 250;
+#else
+constexpr size_t PoolRetireMS = 5000;
+#endif
+
 class IntrusivePooledAllocator {
 public:
   struct MemoryBuffer;
@@ -201,7 +208,15 @@ public:
    *
    * Pool allocator will not attempt to reclaim client owned buffers, would be unsafe to do so.
    */
+#if defined(FEX_IOS_HOST) && !defined(__arm64ec__) && !defined(_M_ARM64EC)
+  // MADEIRA, WOW64 module: a disowned buffer can be reclaimed by another thread
+  // after 250ms instead of 5s. A 32-bit title that starts ~20 threads in a few
+  // seconds otherwise holds one 16MB IR + 8MB decoder buffer per thread, and on a
+  // 454 GB map (iPad Air 4) that alone exhausted FEX's host band.
+  constexpr static std::chrono::duration DURATION {std::chrono::milliseconds(PoolRetireMS)};
+#else
   constexpr static std::chrono::duration DURATION {std::chrono::seconds(5)};
+#endif
 
 protected:
   IntrusivePooledAllocator() = default;
