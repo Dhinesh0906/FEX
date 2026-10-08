@@ -18,6 +18,65 @@ namespace FEXCore::CPU {
 //
 // TelemetrySetValue at the bottom of this file is the one op here that is NOT a guest access; its
 // pointer comes out of CpuStateFrame and is already a host address.
+// MADEIRA: x86 permits LOCK-prefixed operations at any alignment; ARM64 (even
+// with LSE2) alignment-faults when an atomic access crosses a 16-byte granule.
+// Emulating such faults per execution costs a host exception round trip, and
+// different fault handlers do not exclude each other, so a CAS and a fetch-add
+// on the same packed counter could interleave and lose an update (God of War's
+// job system stalled on exactly that). Instead every atomic op checks for the
+// split case inline and performs it with plain loads and stores under ONE
+// in-process mutex (FEX's StrictSplitLockMutex word). None of these
+// instructions touch NZCV.
+bool Arm64JITCore::EmitSplitLockCheck(uint32_t AccessBytes, ARMEmitter::Register MemSrc, ARMEmitter::ForwardLabel* SplitAccess) {
+  if (AccessBytes <= 1) {
+    return false;
+  }
+  and_(ARMEmitter::Size::i64Bit, TMP1, MemSrc, 15);
+  add(ARMEmitter::Size::i64Bit, TMP1, TMP1, AccessBytes);
+  sub(ARMEmitter::Size::i64Bit, TMP1, TMP1, 17); // >= 0 iff the access crosses 16 bytes
+  (void)tbz(TMP1, 63, SplitAccess);
+  return true;
+}
+
+// Leaves the mutex address in TMP3; clobbers TMP1 and TMP4.
+void Arm64JITCore::EmitSplitLockAcquire() {
+  LoadConstant(ARMEmitter::Size::i64Bit, TMP3, reinterpret_cast<uint64_t>(&CTX->StrictSplitLockMutex));
+  ARMEmitter::BackwardLabel Acquire;
+  (void)Bind(&Acquire);
+  ldaxr(ARMEmitter::SubRegSize::i32Bit, TMP4, TMP3);
+  (void)cbnz(ARMEmitter::Size::i32Bit, TMP4, &Acquire);
+  movz(ARMEmitter::Size::i32Bit, TMP4, 1);
+  stxr(ARMEmitter::SubRegSize::i32Bit, TMP1, TMP4, TMP3);
+  (void)cbnz(ARMEmitter::Size::i32Bit, TMP1, &Acquire);
+}
+
+// STLR orders the emulated access before the release.
+void Arm64JITCore::EmitSplitLockRelease() {
+  stlr(ARMEmitter::WReg::zr, TMP3);
+}
+
+// Plain (unaligned-capable) load into TMP2, zero-extended.
+void Arm64JITCore::EmitSplitLoad(uint32_t AccessBytes, ARMEmitter::Register MemSrc) {
+  if (AccessBytes == 2) {
+    ldrh(TMP2.R(), MemSrc);
+  } else if (AccessBytes == 4) {
+    ldr(TMP2.W(), MemSrc);
+  } else {
+    ldr(TMP2, MemSrc);
+  }
+}
+
+void Arm64JITCore::EmitSplitStore(uint32_t AccessBytes, ARMEmitter::Register Value, ARMEmitter::Register MemSrc) {
+  if (AccessBytes == 2) {
+    strh(Value, MemSrc);
+  } else if (AccessBytes == 4) {
+    str(Value.W(), MemSrc);
+  } else {
+    str(Value.X(), MemSrc);
+  }
+}
+
+
 DEF_OP(CASPair) {
   auto Op = IROp->C<IR::IROp_CASPair>();
   LOGMAN_THROW_A_FMT(IROp->ElementSize == IR::OpSize::i32Bit || IROp->ElementSize == IR::OpSize::i64Bit, "Wrong element size");
@@ -111,12 +170,37 @@ DEF_OP(CAS) {
   auto Dst = GetReg(Node);
 
   if (CTX->HostFeatures.SupportsAtomics) {
+    const uint32_t AccessBytes = IR::OpSizeToSize(IROp->Size);
+    ARMEmitter::ForwardLabel SplitAccess;
+    ARMEmitter::ForwardLabel Done;
+    const bool CanSplit = EmitSplitLockCheck(AccessBytes, MemSrc, &SplitAccess);
+
     if (Expected == Dst && Dst != MemSrc && Dst != Desired) {
       casal(SubEmitSize, Dst, Desired, MemSrc);
     } else {
       mov(EmitSize, TMP2, Expected);
       casal(SubEmitSize, TMP2, Desired, MemSrc);
       mov(EmitSize, Dst, TMP2.R());
+    }
+
+    if (CanSplit) {
+      (void)b(&Done);
+      (void)Bind(&SplitAccess);
+      EmitSplitLockAcquire();
+      EmitSplitLoad(AccessBytes, MemSrc);
+      ARMEmitter::ForwardLabel Mismatch;
+      if (AccessBytes == 2) {
+        eor(ARMEmitter::Size::i32Bit, TMP4.R(), TMP2.R(), Expected);
+        and_(ARMEmitter::Size::i32Bit, TMP4, TMP4, 0xFFFF);
+      } else {
+        eor(AccessBytes == 4 ? ARMEmitter::Size::i32Bit : ARMEmitter::Size::i64Bit, TMP4.R(), TMP2.R(), Expected);
+      }
+      (void)cbnz(ARMEmitter::Size::i64Bit, TMP4, &Mismatch);
+      EmitSplitStore(AccessBytes, Desired, MemSrc);
+      (void)Bind(&Mismatch);
+      EmitSplitLockRelease();
+      mov(EmitSize, Dst, TMP2.R());
+      (void)Bind(&Done);
     }
   } else {
     ARMEmitter::BackwardLabel LoopTop;
@@ -164,7 +248,21 @@ DEF_OP(AtomicSwap) {
                                                           ARMEmitter::SubRegSize::i8Bit;
 
   if (CTX->HostFeatures.SupportsAtomics) {
+    const uint32_t AccessBytes = IR::OpSizeToSize(IROp->Size);
+    ARMEmitter::ForwardLabel SplitAccess;
+    ARMEmitter::ForwardLabel Done;
+    const bool CanSplit = EmitSplitLockCheck(AccessBytes, MemSrc, &SplitAccess);
     ldswpal(SubEmitSize, Src, GetReg(Node), MemSrc);
+    if (CanSplit) {
+      (void)b(&Done);
+      (void)Bind(&SplitAccess);
+      EmitSplitLockAcquire();
+      EmitSplitLoad(AccessBytes, MemSrc);
+      EmitSplitStore(AccessBytes, Src, MemSrc);
+      EmitSplitLockRelease();
+      mov(EmitSize, GetReg(Node), TMP2.R());
+      (void)Bind(&Done);
+    }
   } else {
     ARMEmitter::BackwardLabel LoopTop;
     (void)Bind(&LoopTop);
@@ -184,7 +282,22 @@ DEF_OP(AtomicFetchAdd) {
   auto Src = GetReg(Op->Value);
 
   if (CTX->HostFeatures.SupportsAtomics) {
+    const uint32_t AccessBytes = IR::OpSizeToSize(IROp->Size);
+    ARMEmitter::ForwardLabel SplitAccess;
+    ARMEmitter::ForwardLabel Done;
+    const bool CanSplit = EmitSplitLockCheck(AccessBytes, MemSrc, &SplitAccess);
     ldaddal(SubEmitSize, Src, GetReg(Node), MemSrc);
+    if (CanSplit) {
+      (void)b(&Done);
+      (void)Bind(&SplitAccess);
+      EmitSplitLockAcquire();
+      EmitSplitLoad(AccessBytes, MemSrc);
+      add(EmitSize, TMP4, TMP2, Src);
+      EmitSplitStore(AccessBytes, TMP4.R(), MemSrc);
+      EmitSplitLockRelease();
+      mov(EmitSize, GetReg(Node), TMP2.R());
+      (void)Bind(&Done);
+    }
   } else {
     ARMEmitter::BackwardLabel LoopTop;
     (void)Bind(&LoopTop);
@@ -205,8 +318,23 @@ DEF_OP(AtomicFetchSub) {
   auto Src = GetReg(Op->Value);
 
   if (CTX->HostFeatures.SupportsAtomics) {
+    const uint32_t AccessBytes = IR::OpSizeToSize(IROp->Size);
+    ARMEmitter::ForwardLabel SplitAccess;
+    ARMEmitter::ForwardLabel Done;
+    const bool CanSplit = EmitSplitLockCheck(AccessBytes, MemSrc, &SplitAccess);
     neg(EmitSize, TMP2, Src);
     ldaddal(SubEmitSize, TMP2, GetReg(Node), MemSrc);
+    if (CanSplit) {
+      (void)b(&Done);
+      (void)Bind(&SplitAccess);
+      EmitSplitLockAcquire();
+      EmitSplitLoad(AccessBytes, MemSrc);
+      sub(EmitSize, TMP4, TMP2, Src);
+      EmitSplitStore(AccessBytes, TMP4.R(), MemSrc);
+      EmitSplitLockRelease();
+      mov(EmitSize, GetReg(Node), TMP2.R());
+      (void)Bind(&Done);
+    }
   } else {
     ARMEmitter::BackwardLabel LoopTop;
     (void)Bind(&LoopTop);
@@ -227,8 +355,23 @@ DEF_OP(AtomicFetchAnd) {
   auto Src = GetReg(Op->Value);
 
   if (CTX->HostFeatures.SupportsAtomics) {
+    const uint32_t AccessBytes = IR::OpSizeToSize(IROp->Size);
+    ARMEmitter::ForwardLabel SplitAccess;
+    ARMEmitter::ForwardLabel Done;
+    const bool CanSplit = EmitSplitLockCheck(AccessBytes, MemSrc, &SplitAccess);
     mvn(EmitSize, TMP2, Src);
     ldclral(SubEmitSize, TMP2, GetReg(Node), MemSrc);
+    if (CanSplit) {
+      (void)b(&Done);
+      (void)Bind(&SplitAccess);
+      EmitSplitLockAcquire();
+      EmitSplitLoad(AccessBytes, MemSrc);
+      and_(EmitSize, TMP4, TMP2, Src);
+      EmitSplitStore(AccessBytes, TMP4.R(), MemSrc);
+      EmitSplitLockRelease();
+      mov(EmitSize, GetReg(Node), TMP2.R());
+      (void)Bind(&Done);
+    }
   } else {
     ARMEmitter::BackwardLabel LoopTop;
     (void)Bind(&LoopTop);
@@ -249,7 +392,22 @@ DEF_OP(AtomicFetchCLR) {
   auto Src = GetReg(Op->Value);
 
   if (CTX->HostFeatures.SupportsAtomics) {
+    const uint32_t AccessBytes = IR::OpSizeToSize(IROp->Size);
+    ARMEmitter::ForwardLabel SplitAccess;
+    ARMEmitter::ForwardLabel Done;
+    const bool CanSplit = EmitSplitLockCheck(AccessBytes, MemSrc, &SplitAccess);
     ldclral(SubEmitSize, Src, GetReg(Node), MemSrc);
+    if (CanSplit) {
+      (void)b(&Done);
+      (void)Bind(&SplitAccess);
+      EmitSplitLockAcquire();
+      EmitSplitLoad(AccessBytes, MemSrc);
+      bic(EmitSize, TMP4, TMP2, Src);
+      EmitSplitStore(AccessBytes, TMP4.R(), MemSrc);
+      EmitSplitLockRelease();
+      mov(EmitSize, GetReg(Node), TMP2.R());
+      (void)Bind(&Done);
+    }
   } else {
     ARMEmitter::BackwardLabel LoopTop;
     (void)Bind(&LoopTop);
@@ -270,7 +428,22 @@ DEF_OP(AtomicFetchOr) {
   auto Src = GetReg(Op->Value);
 
   if (CTX->HostFeatures.SupportsAtomics) {
+    const uint32_t AccessBytes = IR::OpSizeToSize(IROp->Size);
+    ARMEmitter::ForwardLabel SplitAccess;
+    ARMEmitter::ForwardLabel Done;
+    const bool CanSplit = EmitSplitLockCheck(AccessBytes, MemSrc, &SplitAccess);
     ldsetal(SubEmitSize, Src, GetReg(Node), MemSrc);
+    if (CanSplit) {
+      (void)b(&Done);
+      (void)Bind(&SplitAccess);
+      EmitSplitLockAcquire();
+      EmitSplitLoad(AccessBytes, MemSrc);
+      orr(EmitSize, TMP4, TMP2, Src);
+      EmitSplitStore(AccessBytes, TMP4.R(), MemSrc);
+      EmitSplitLockRelease();
+      mov(EmitSize, GetReg(Node), TMP2.R());
+      (void)Bind(&Done);
+    }
   } else {
     ARMEmitter::BackwardLabel LoopTop;
     (void)Bind(&LoopTop);
@@ -291,7 +464,22 @@ DEF_OP(AtomicFetchXor) {
   auto Src = GetReg(Op->Value);
 
   if (CTX->HostFeatures.SupportsAtomics) {
+    const uint32_t AccessBytes = IR::OpSizeToSize(IROp->Size);
+    ARMEmitter::ForwardLabel SplitAccess;
+    ARMEmitter::ForwardLabel Done;
+    const bool CanSplit = EmitSplitLockCheck(AccessBytes, MemSrc, &SplitAccess);
     ldeoral(SubEmitSize, Src, GetReg(Node), MemSrc);
+    if (CanSplit) {
+      (void)b(&Done);
+      (void)Bind(&SplitAccess);
+      EmitSplitLockAcquire();
+      EmitSplitLoad(AccessBytes, MemSrc);
+      eor(EmitSize, TMP4, TMP2, Src);
+      EmitSplitStore(AccessBytes, TMP4.R(), MemSrc);
+      EmitSplitLockRelease();
+      mov(EmitSize, GetReg(Node), TMP2.R());
+      (void)Bind(&Done);
+    }
   } else {
     ARMEmitter::BackwardLabel LoopTop;
     (void)Bind(&LoopTop);
@@ -311,6 +499,10 @@ DEF_OP(AtomicFetchNeg) {
   auto MemSrc = GetGuestMemReg(Op->Addr);
 
   if (CTX->HostFeatures.SupportsAtomics) {
+    const uint32_t AccessBytes = IR::OpSizeToSize(IROp->Size);
+    ARMEmitter::ForwardLabel SplitAccess;
+    ARMEmitter::ForwardLabel Done;
+    const bool CanSplit = EmitSplitLockCheck(AccessBytes, MemSrc, &SplitAccess);
     // Use a CAS loop to avoid needing to emulate unaligned LLSC atomics
     ldr(SubEmitSize, TMP2, MemSrc);
     ARMEmitter::BackwardLabel LoopTop;
@@ -321,6 +513,17 @@ DEF_OP(AtomicFetchNeg) {
     sub(EmitSize, TMP3, TMP2, TMP4);
     (void)cbnz(EmitSize, TMP3, &LoopTop);
     mov(EmitSize, GetReg(Node), TMP2.R());
+    if (CanSplit) {
+      (void)b(&Done);
+      (void)Bind(&SplitAccess);
+      EmitSplitLockAcquire();
+      EmitSplitLoad(AccessBytes, MemSrc);
+      neg(EmitSize, TMP4, TMP2);
+      EmitSplitStore(AccessBytes, TMP4.R(), MemSrc);
+      EmitSplitLockRelease();
+      mov(EmitSize, GetReg(Node), TMP2.R());
+      (void)Bind(&Done);
+    }
   } else {
     ARMEmitter::BackwardLabel LoopTop;
     (void)Bind(&LoopTop);

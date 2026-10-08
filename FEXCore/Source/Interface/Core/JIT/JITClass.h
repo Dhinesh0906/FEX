@@ -698,6 +698,15 @@ private:
 
   void EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool CheckTF);
 
+  // MADEIRA split-lock helpers (AtomicOps.cpp): every guest atomic whose access
+  // crosses a 16-byte granule is emulated inline under one in-process mutex, so
+  // all such operations exclude each other (none of them faults).
+  bool EmitSplitLockCheck(uint32_t AccessBytes, ARMEmitter::Register MemSrc, ARMEmitter::ForwardLabel* SplitAccess);
+  void EmitSplitLockAcquire();
+  void EmitSplitLockRelease();
+  void EmitSplitLoad(uint32_t AccessBytes, ARMEmitter::Register MemSrc);
+  void EmitSplitStore(uint32_t AccessBytes, ARMEmitter::Register Value, ARMEmitter::Register MemSrc);
+
 #define DEF_OP(x) void Op_##x(IR::IROp_Header const* IROp, IR::Ref Node)
 
   ///< Unhandled handler
